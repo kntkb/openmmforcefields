@@ -65,7 +65,7 @@ class SystemGenerator:
     postprocess_system : method
         If not None, this method will be called as ``system = postprocess_system(system)`` to post-process the System object for create_system(topology) before it is returned.
     """
-    def __init__(self, forcefields=None, small_molecule_forcefield='openff-1.0.0', forcefield_kwargs=None, nonperiodic_forcefield_kwargs=None, periodic_forcefield_kwargs=None, barostat=None, molecules=None, cache=None, postprocess_system=None):
+    def __init__(self, forcefields=None, small_molecule_forcefield='openff-1.0.0', forcefield_kwargs=None, nonperiodic_forcefield_kwargs=None, periodic_forcefield_kwargs=None, template_generator_kwargs=None, barostat=None, molecules=None, cache=None, postprocess_system=None):
         """
         This is a utility class to generate OpenMM Systems from Open Force Field Topology objects using AMBER
         protein force fields and GAFF small molecule force fields.
@@ -89,6 +89,8 @@ class SystemGenerator:
             Keyword arguments added to forcefield_kwargs when the Topology is non-periodic.
         periodic_forcefield_kwargs : NonbondedMethod, optional, default={'nonbondedMethod' : PME}
             Keyword arguments added to forcefield_kwargs when the Topology is periodic.
+        template_generator_kwargs : dict, optional, default=None
+            Keyword arguments to be passed to ``openmmforcefields.generators.template_generators``.
         barostat : openmm.MonteCarloBarostat, optional, default=None
             If not None, a new ``MonteCarloBarostat`` with matching parameters (but a different random number seed) will be created and
             added to each newly created ``System``.
@@ -126,10 +128,12 @@ class SystemGenerator:
         If the ``cache`` argument is specified, parameterized molecules are cached in the corresponding file.
 
         >>> cache = 'db.json'
-        >>> system_generator = SystemGenerator(forcefields=forcefields, small_molecule_forcefield='gaff-2.11', forcefield_kwargs=forcefield_kwargs, cache=cache)
+        >>> system_generator = SystemGenerator(forcefields=amber_forcefields, small_molecule_forcefield='gaff-2.11', forcefield_kwargs=forcefield_kwargs, cache=cache)  # doctest: +SKIP
 
         To use a barostat, you need to define a barostat whose parameters will be copied into each system (with a different random number seed):
 
+        >>> import openmm
+        >>> from openmm import unit
         >>> pressure = 1.0 * unit.atmospheres
         >>> temperature = 298.0 * unit.kelvin
         >>> frequency = 25 # steps
@@ -137,6 +141,9 @@ class SystemGenerator:
 
         Now, you can create an OpenMM ``System`` object from an OpenMM ``Topology`` object and a list of OpenFF ``Molecule`` objects
 
+        >>> from openff.toolkit import Molecule, Topology
+        >>> molecules = [Molecule.from_smiles(smiles) for smiles in ["CCO", "c1ccccc1"]]
+        >>> openmm_topology = Topology.from_molecules(molecules).to_openmm()
         >>> system = system_generator.create_system(openmm_topology, molecules=molecules)
 
         Parameters for multiple force fields can be held in the same cache file.
@@ -145,7 +152,7 @@ class SystemGenerator:
         simply change the ``small_molecule_forcefield`` parameter to one of the supported ``GAFFTemplateGenerator.INSTALLED_FORCEFIELDS``:
 
         >>> small_molecule_forcefield = 'openff-1.0.0'
-        >>> system_generator = SystemGenerator(forcefields=forcefields, small_molecule_forcefield=small_molecule_forcefield, forcefield_kwargs=forcefield_kwargs)
+        >>> system_generator = SystemGenerator(forcefields=amber_forcefields, small_molecule_forcefield=small_molecule_forcefield, forcefield_kwargs=forcefield_kwargs)
 
         For debugging convenience, you can also turn _off_ specific interactions during system creation, such as particle charges:
 
@@ -179,6 +186,7 @@ class SystemGenerator:
         self.forcefield_kwargs = forcefield_kwargs if forcefield_kwargs is not None else dict()
         self.nonperiodic_forcefield_kwargs = nonperiodic_forcefield_kwargs if nonperiodic_forcefield_kwargs is not None else {'nonbondedMethod' : app.NoCutoff}
         self.periodic_forcefield_kwargs = periodic_forcefield_kwargs if periodic_forcefield_kwargs is not None else {'nonbondedMethod' : app.PME}
+        self.template_generator_kwargs = template_generator_kwargs if template_generator_kwargs is not None else dict()
 
         # Raise an exception if nonbondedForce is specified in forcefield_kwargs
         if 'nonbondedMethod' in self.forcefield_kwargs:
@@ -195,7 +203,7 @@ class SystemGenerator:
             for template_generator_cls in SmallMoleculeTemplateGenerator.__subclasses__():
                 try:
                     _logger.debug(f'Trying {template_generator_cls.__name__} to load {small_molecule_forcefield}')
-                    self.template_generator = template_generator_cls(forcefield=small_molecule_forcefield, cache=cache)
+                    self.template_generator = template_generator_cls(forcefield=small_molecule_forcefield, cache=cache, template_generator_kwargs=self.template_generator_kwargs)
                     break
                 except ValueError as e:
                     _logger.debug(f'  {template_generator_cls.__name__} cannot load {small_molecule_forcefield}')
@@ -244,8 +252,8 @@ class SystemGenerator:
         """
         Add barostat and modify forces if requested.
         """
-        # Add barostat if requested.
-        if self.barostat is not None:
+        # Add barostat if requested and the system uses periodic boundary conditions
+        if (self.barostat is not None) and system.usesPeriodicBoundaryConditions():
             import numpy as np
             import openmm
             MAXINT = np.iinfo(np.int32).max
